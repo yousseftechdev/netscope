@@ -1,59 +1,88 @@
 use std::env;
+use std::io::{self, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const GREEN: &str = "\x1b[32m";
+const GRAY: &str = "\x1b[90m";
+const RESET: &str = "\x1b[0m";
+const BOLD: &str = "\x1b[1m";
 
 fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 4 {
-        eprintln!("Usage: {} <ip> <start port> <end port>", args[0]);
-        eprintln!("Example: {} 127.0.0.1 20 100", args[0]);
+        eprintln!("Usage: {} <ip_address> <start_port> <end_port>", args[0]);
         return;
     }
 
     let ip = match IpAddr::from_str(&args[1]) {
-        Ok(parsedIp) => parsedIp,
+        Ok(parsed) => parsed,
         Err(_) => {
-            eprintln!("Error: Invalid IP address string!");
+            eprintln!("Error: Invalid IP address '{}'", args[1]);
             return;
         }
     };
 
-    let startPort = match args[2].parse() {
-        Ok(port) => port,
+    let start_port: u16 = match args[2].parse() {
+        Ok(p) => p,
         Err(_) => {
             eprintln!("Error: Invalid start port '{}'", args[2]);
             return;
         }
     };
 
-    let endPort = match args[3].parse() {
-        Ok(port) => port,
+    let end_port: u16 = match args[3].parse() {
+        Ok(p) => p,
         Err(_) => {
             eprintln!("Error: Invalid end port '{}'", args[3]);
             return;
         }
     };
 
-    if startPort > endPort {
-        eprintln!("Error: Start port cannot be greater than end port");
+    let total_ports = (end_port - start_port + 1) as usize;
+    let mut open_ports: Vec<u16> = Vec::new();
+
+    println!("{BOLD}=== NetScope Scanner ==={RESET}");
+    println!("Target IP : {BOLD}{ip}{RESET}");
+    println!("Range     : {start_port}..={end_port} ({total_ports} ports)\n");
+
+    let timer = Instant::now();
+
+    for (index, port) in (start_port..=end_port).enumerate() {
+        let current_count = index + 1;
+
+        print!(
+            "\r{GRAY}[Scanning {current_count}/{total_ports}] Checking port {port}...{RESET}\x1b[K"
+        );
+        io::stdout().flush().unwrap();
+
+        if scan_port(ip, port) {
+            open_ports.push(port);
+            println!("\r{GREEN}[+] Port {:<5} : OPEN{RESET}\x1b[K", port);
+        }
     }
 
-    println!("=== NetScope: IP & Port Scanner ===");
-    println!("Scanning target IP: {ip}\n");
+    let elapsed = timer.elapsed();
 
-    for port in startPort..=endPort {
-        scanPort(ip, port);
+    print!("\r\x1b[K");
+    println!("\n{BOLD}=== Scan Summary ==={RESET}");
+    println!("Time taken : {:.2?}", elapsed);
+    println!("Open ports : {GREEN}{}{RESET}", open_ports.len());
+
+    if !open_ports.is_empty() {
+        print!("Found      : ");
+        for p in &open_ports {
+            print!("{GREEN}{p}{RESET} ");
+        }
+        println!();
     }
 }
 
-fn scanPort(ip: IpAddr, port: u16) {
+fn scan_port(ip: IpAddr, port: u16) -> bool {
     let address = SocketAddr::new(ip, port);
-    let timeout = Duration::from_millis(500);
+    let timeout = Duration::from_millis(200);
 
-    match TcpStream::connect_timeout(&address, timeout) {
-        Ok(_) => println!("[+] Port {:<5} : OPEN", port),
-        Err(_) => println!("[-] Port {:<5} : Closed / Filtered", port)
-    }
+    TcpStream::connect_timeout(&address, timeout).is_ok()
 }
