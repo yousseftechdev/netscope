@@ -6,7 +6,9 @@ use std::io::{self, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::process::Command;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::{eprint, print, println, thread};
 use std::time::{Duration, Instant};
 
@@ -14,6 +16,11 @@ const GREEN: &str = "\x1b[32m";
 const GRAY: &str = "\x1b[90m";
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
+
+enum ScanEvent {
+    Open(u16),
+    Progress,
+}
 
 fn main() {
     println!("{BOLD}=== NetScope: Network Discovery & Tools ==={RESET}");
@@ -149,22 +156,80 @@ fn ping_host(ip: IpAddr) {
 }
 
 fn port_scan_host(ip: IpAddr, start_port: u16, end_port: u16) {
-    let total_ports = end_port - start_port + 1;
+    let total_ports = (end_port - start_port + 1) as usize;
 
     println!("\n--- Scanning {total_ports} ports on {ip} ---");
 
-    for port in start_port..=end_port {
-        let address = SocketAddr::new(ip, port);
-        let timeout = Duration::from_millis(300);
+    let timer = Instant::now();
 
-        print!("\r\x1b[K{GRAY}Scanned [ {port}/{total_ports} ]...{RESET}");
-        io::stdout().flush().unwrap();
+    let MAX_WORKERS = 100;
+    let num_workers = MAX_WORKERS.min(total_ports);
 
-        if TcpStream::connect_timeout(&address, timeout).is_ok() {
-            println!("\r\x1b[K{GREEN}[+] Port {:<5} : OPEN{RESET}", port);
+    let (tx, rx) = mpsc::channel();
+
+    let current_port = Arc::new(AtomicU32::new(start_port as u32));
+    let mut handles = Vec::with_capacity(num_workers);
+
+    for _ in 0..num_workers {
+        let tx = tx.clone();
+        let current_port = Arc::clone(&current_port);
+
+        let handle = thread::spawn(move || {
+            loop {
+                let port = current_port.fetch_add(1, Ordering::SeqCst);
+                if port > end_port as u32 {
+                    break;
+                }
+
+                let port  = port as u16;
+                let address = SocketAddr::new(ip, port);
+                let timeout = Duration::from_millis(250);
+
+                if TcpStream::connect_timeout(&address, timeout).is_ok() {
+                    let _ = tx.send(ScanEvent::Open(port));
+                }
+                let _ = tx.send(ScanEvent::Progress);
+            }
+        });
+        handles.push(handle);
+    }
+
+    drop(tx);
+
+    let mut scanned_count = 0;
+    let mut open_ports = Vec::new();
+
+    for event in rx {
+        match event {
+            ScanEvent::Open(port) => {
+                open_ports.push(port);
+                println!("\r\x1b[K{GREEN}[+] Port {:<5} : OPEN{RESET}", port);
+            }
+            ScanEvent::Progress => {
+                scanned_count += 1;
+                print!("\r\x1b[K{GRAY}Scanned [ {scanned_count}/{total_ports} ]...{RESET}");
+                io::stdout().flush().unwrap();
+            }
         }
     }
-    println!("\r\x1b[K{GREEN}Finished scanning!{RESET}")
+
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    open_ports.sort();
+
+    println!("\r\x1b[K{GREEN}Finished scanning {total_ports} ports in {:.2?}!{RESET}", timer.elapsed());
+
+    if !open_ports.is_empty() {
+        print!("{BOLD}Open ports found:{RESET} ");
+        for p in &open_ports {
+            print!("{GREEN}{p}{RESET} ");
+        }
+        println!();
+    } else {
+        println!("{GRAY}No open ports found in this range.{RESET}");
+    }
 }
 
 fn read_user_number() -> usize {
