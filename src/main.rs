@@ -1,14 +1,18 @@
+use std::env;
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::str::FromStr;
 use std::time::Duration;
 
 fn main() {
-    println!("=== NetScope: IP & Port Scanner ===");
+    let args: Vec<String> = env::args().collect();
 
-    let targetIpStr = "127.0.0.1";
-    let portsToScan = [21, 22, 80, 443, 3000, 8080];
+    if args.len() < 4 {
+        eprintln!("Usage: {} <ip> <start port> <end port>", args[0]);
+        eprintln!("Example: {} 127.0.0.1 20 100", args[0]);
+        return;
+    }
 
-    let ip = match IpAddr::from_str(targetIpStr) {
+    let ip = match IpAddr::from_str(&args[1]) {
         Ok(parsedIp) => parsedIp,
         Err(_) => {
             eprintln!("Error: Invalid IP address string!");
@@ -16,9 +20,30 @@ fn main() {
         }
     };
 
+    let startPort = match args[2].parse() {
+        Ok(port) => port,
+        Err(_) => {
+            eprintln!("Error: Invalid start port '{}'", args[2]);
+            return;
+        }
+    };
+
+    let endPort = match args[3].parse() {
+        Ok(port) => port,
+        Err(_) => {
+            eprintln!("Error: Invalid end port '{}'", args[3]);
+            return;
+        }
+    };
+
+    if startPort > endPort {
+        eprintln!("Error: Start port cannot be greater than end port");
+    }
+
+    println!("=== NetScope: IP & Port Scanner ===");
     println!("Scanning target IP: {ip}\n");
 
-    for port in portsToScan {
+    for port in startPort..=endPort {
         scanPort(ip, port);
     }
 }
