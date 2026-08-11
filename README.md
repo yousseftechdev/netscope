@@ -104,4 +104,4 @@ cp target/release/netscope ~/.local/bin/
 
 ## AI Usage Declaration
 ---
-> **Note on AI Usage:** Built with assistance from AI tools (Gemini) used as a coding assistant for troubleshooting Rust borrow checker errors and multi-thread logic.
+> **Note on AI Usage:** Built with assistance from AI tools (Gemini) used as a coding assistant for troubleshooting Rust borrow checker errors, multi-thread logic, and crossplatform compatibility.

@@ -3,20 +3,20 @@
 #![allow(dead_code)]
 
 use crossterm::{
-    cursor,
-    event::{ self, Event, KeyCode, KeyModifiers },
-    terminal::{ disable_raw_mode, enable_raw_mode },
+    cursor::{self, MoveToColumn, MoveUp},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType},
     ExecutableCommand,
 };
-use std::io::{ self, Read, Write };
-use std::net::{ IpAddr, SocketAddr, TcpStream };
+use std::io::{self, Read, Write};
+use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::process::Command;
 use std::str::FromStr;
-use std::sync::atomic::{ AtomicBool, Ordering };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::{ Duration, Instant };
+use std::time::{Duration, Instant};
 
 const GREEN: &str = "\x1b[32m";
 const GRAY: &str = "\x1b[90m";
@@ -55,10 +55,14 @@ fn main() {
         let timer = Instant::now();
         let active_ips = run_with_spinner(
             &format!("Discovering active hosts on {subnet_prefix}.1..=254"),
-            || discover_hosts(&subnet_prefix)
+            || discover_hosts(&subnet_prefix),
         );
 
-        println!("Found {} active host(s) in {:.2?}\n", active_ips.len(), timer.elapsed());
+        println!(
+            "Found {} active host(s) in {:.2?}\n",
+            active_ips.len(),
+            timer.elapsed()
+        );
 
         if active_ips.is_empty() {
             println!("{GRAY}No active hosts detected on this subnet.{RESET}");
@@ -69,10 +73,8 @@ fn main() {
         }
 
         'target: loop {
-            let mut host_options: Vec<String> = active_ips
-                .iter()
-                .map(|ip| ip.to_string())
-                .collect();
+            let mut host_options: Vec<String> =
+                active_ips.iter().map(|ip| ip.to_string()).collect();
             host_options.push("Rescan / Change Subnet".to_string());
             host_options.push("Exit NetScope".to_string());
 
@@ -92,7 +94,7 @@ fn main() {
                     "Ping Latency Check",
                     "Scan Ports",
                     "Select Another Host",
-                    "Exit NetScope"
+                    "Exit NetScope",
                 ];
 
                 let action_title = format!("Target: {target_ip}");
@@ -115,7 +117,10 @@ fn main() {
     println!("\n{BOLD}Goodbye!{RESET}");
 }
 
-fn run_with_spinner<F, T>(message: &str, f: F) -> T where F: FnOnce() -> T {
+fn run_with_spinner<F, T>(message: &str, f: F) -> T
+where
+    F: FnOnce() -> T,
+{
     let done = Arc::new(AtomicBool::new(false));
     let done_clone = done.clone();
     let msg = message.to_string();
@@ -143,52 +148,75 @@ fn run_with_spinner<F, T>(message: &str, f: F) -> T where F: FnOnce() -> T {
 fn prompt_menu<T: AsRef<str>>(title: &str, options: &[T]) -> usize {
     let _guard = TerminalModeGuard::new();
     let mut selected = 0;
+    let mut first_render = true;
 
     loop {
-        print!("\r{BOLD}{title}:{RESET}\r\n");
+        if !first_render {
+            let _ = io::stdout().execute(MoveUp((options.len() + 1) as u16));
+        }
+        first_render = false;
+
+        let _ = io::stdout().execute(MoveToColumn(0));
+        let _ = io::stdout().execute(Clear(ClearType::CurrentLine));
+        println!("{BOLD}{title}:{RESET}");
+
         for (idx, option) in options.iter().enumerate() {
             let label = option.as_ref();
+            let _ = io::stdout().execute(MoveToColumn(0));
+            let _ = io::stdout().execute(Clear(ClearType::CurrentLine));
             if idx == selected {
-                print!("\r  {GREEN}❯ {label}{RESET}\x1b[K\r\n");
+                println!("  {GREEN}❯ {label}{RESET}");
             } else {
-                print!("\r    {label}\x1b[K\r\n");
+                println!("    {label}");
             }
         }
         let _ = io::stdout().flush();
 
-        if let Ok(Event::Key(key_event)) = event::read() {
-            match key_event.code {
-                KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                    drop(_guard);
-                    std::process::exit(0);
+        loop {
+            if let Ok(Event::Key(key_event)) = event::read() {
+                if key_event.kind != KeyEventKind::Press {
+                    continue;
                 }
-                KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
-                    if selected > 0 {
-                        selected -= 1;
+
+                match key_event.code {
+                    KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                        drop(_guard);
+                        std::process::exit(0);
                     }
-                }
-                KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
-                    if selected + 1 < options.len() {
-                        selected += 1;
+                    KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+                        if selected > 0 {
+                            selected -= 1;
+                        }
+                        break;
                     }
-                }
-                KeyCode::Enter => {
-                    print!("\x1b[{}A", options.len() + 1);
-                    print!(
-                        "\r\x1b[K{BOLD}{title}:{RESET} {GREEN}{}{RESET}\r\n",
-                        options[selected].as_ref()
-                    );
-                    for _ in 0..options.len() {
-                        print!("\r\x1b[K\r\n");
+                    KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+                        if selected + 1 < options.len() {
+                            selected += 1;
+                        }
+                        break;
                     }
-                    print!("\x1b[{}A", options.len());
-                    let _ = io::stdout().flush();
-                    return selected;
+                    KeyCode::Enter => {
+                        let _ = io::stdout().execute(MoveUp((options.len() + 1) as u16));
+                        let _ = io::stdout().execute(MoveToColumn(0));
+                        let _ = io::stdout().execute(Clear(ClearType::CurrentLine));
+                        println!(
+                            "{BOLD}{title}:{RESET} {GREEN}{}{RESET}",
+                            options[selected].as_ref()
+                        );
+
+                        for _ in 0..options.len() {
+                            let _ = io::stdout().execute(MoveToColumn(0));
+                            let _ = io::stdout().execute(Clear(ClearType::CurrentLine));
+                            println!();
+                        }
+                        let _ = io::stdout().execute(MoveUp(options.len() as u16));
+                        let _ = io::stdout().flush();
+                        return selected;
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
-        print!("\x1b[{}A", options.len() + 1);
     }
 }
 
@@ -274,7 +302,7 @@ fn configure_and_run_port_scan(ip: IpAddr) {
         "Quick Scan (Top 20 common ports)",
         "Full Range Scan (1 - 65535)",
         "Custom Range",
-        "Back"
+        "Back",
     ];
 
     let choice = prompt_menu("Port Scan Profiles", &scan_profiles);
@@ -282,44 +310,23 @@ fn configure_and_run_port_scan(ip: IpAddr) {
     match choice {
         0 => {
             let common_ports = vec![
-                21,
-                22,
-                23,
-                25,
-                53,
-                80,
-                110,
-                135,
-                139,
-                143,
-                443,
-                445,
-                1433,
-                3306,
-                3389,
-                5432,
-                6379,
-                8080,
-                8443
+                21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443, 445, 1433, 3306, 3389, 5432, 6379,
+                8080, 8443,
             ];
-            let res = run_with_spinner("Scanning top ports", || {
-                scan_port_list(ip, &common_ports)
-            });
+            let res =
+                run_with_spinner("Scanning top ports", || scan_port_list(ip, &common_ports));
             print_scan_results(ip, res);
         }
         1 => {
-            let res = run_with_spinner("Scanning all 65,535 ports", ||
+            let res = run_with_spinner("Scanning all 65,535 ports", || {
                 port_scan_range(ip, 1, 65535)
-            );
+            });
             print_scan_results(ip, res);
         }
         2 => {
             let start = prompt_number_in_range("Enter start port (1-65535): ", 1, 65535) as u16;
-            let end = prompt_number_in_range(
-                "Enter end port (1-65535): ",
-                start as usize,
-                65535
-            ) as u16;
+            let end =
+                prompt_number_in_range("Enter end port (1-65535): ", start as usize, 65535) as u16;
             let res = run_with_spinner(&format!("Scanning ports {start}..={end}"), || {
                 port_scan_range(ip, start, end)
             });
@@ -340,11 +347,15 @@ fn is_host_alive(ip: IpAddr) -> bool {
         return true;
     }
 
+    let count_flag = if cfg!(windows) { "-n" } else { "-c" };
+    let timeout_flag = if cfg!(windows) { "-w" } else { "-W" };
+    let timeout_val = if cfg!(windows) { "1000" } else { "1" };
+
     let output = Command::new("ping")
-        .arg("-c")
+        .arg(count_flag)
         .arg("1")
-        .arg("-W")
-        .arg("1")
+        .arg(timeout_flag)
+        .arg(timeout_val)
         .arg(ip.to_string())
         .output();
 
@@ -398,7 +409,12 @@ fn discover_hosts(subnet_prefix: &str) -> Vec<IpAddr> {
 
 fn ping_host(ip: IpAddr) {
     println!("\nPinging {ip}...");
-    let status = Command::new("ping").arg("-c").arg("4").arg(ip.to_string()).status();
+    let count_flag = if cfg!(windows) { "-n" } else { "-c" };
+    let status = Command::new("ping")
+        .arg(count_flag)
+        .arg("4")
+        .arg(ip.to_string())
+        .status();
 
     match status {
         Ok(s) if s.success() => println!("{GREEN}Ping successful.{RESET}\n"),
@@ -453,9 +469,12 @@ fn print_scan_results(ip: IpAddr, (open_ports, elapsed): (Vec<u16>, Duration)) {
 
     println!("\nOpen ports on {ip}:");
     for &port in &open_ports {
-        // <-- Added `&` before open_ports
         let service = get_service_name(port);
         println!("  Port {GREEN}{port:>5}/tcp{RESET} OPEN ({service})");
     }
-    println!("\nScan complete: Found {} open port(s) in {:.2?}\n", open_ports.len(), elapsed);
+    println!(
+        "\nScan complete: Found {} open port(s) in {:.2?}\n",
+        open_ports.len(),
+        elapsed
+    );
 }
