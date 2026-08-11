@@ -2,15 +2,21 @@
 #![allow(unused)]
 #![allow(dead_code)]
 
-use std::io::{self, Read, Write};
-use std::net::{IpAddr, SocketAddr, TcpStream};
+use crossterm::{
+    cursor,
+    event::{ self, Event, KeyCode, KeyModifiers },
+    terminal::{ disable_raw_mode, enable_raw_mode },
+    ExecutableCommand,
+};
+use std::io::{ self, Read, Write };
+use std::net::{ IpAddr, SocketAddr, TcpStream };
 use std::process::Command;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{ AtomicBool, Ordering };
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{ Duration, Instant };
 
 const GREEN: &str = "\x1b[32m";
 const GRAY: &str = "\x1b[90m";
@@ -26,18 +32,16 @@ struct TerminalModeGuard;
 
 impl TerminalModeGuard {
     fn new() -> Self {
-        let _ = Command::new("stty").arg("raw").arg("-echo").status();
-        print!("\x1b[?25l");
-        let _ = io::stdout().flush();
+        let _ = enable_raw_mode();
+        let _ = io::stdout().execute(cursor::Hide);
         TerminalModeGuard
     }
 }
 
 impl Drop for TerminalModeGuard {
     fn drop(&mut self) {
-        let _ = Command::new("stty").arg("sane").status();
-        print!("\x1b[?25h");
-        let _ = io::stdout().flush();
+        let _ = io::stdout().execute(cursor::Show);
+        let _ = disable_raw_mode();
     }
 }
 
@@ -51,14 +55,10 @@ fn main() {
         let timer = Instant::now();
         let active_ips = run_with_spinner(
             &format!("Discovering active hosts on {subnet_prefix}.1..=254"),
-            || discover_hosts(&subnet_prefix),
+            || discover_hosts(&subnet_prefix)
         );
 
-        println!(
-            "Found {} active host(s) in {:.2?}\n",
-            active_ips.len(),
-            timer.elapsed()
-        );
+        println!("Found {} active host(s) in {:.2?}\n", active_ips.len(), timer.elapsed());
 
         if active_ips.is_empty() {
             println!("{GRAY}No active hosts detected on this subnet.{RESET}");
@@ -69,8 +69,10 @@ fn main() {
         }
 
         'target: loop {
-            let mut host_options: Vec<String> =
-                active_ips.iter().map(|ip| ip.to_string()).collect();
+            let mut host_options: Vec<String> = active_ips
+                .iter()
+                .map(|ip| ip.to_string())
+                .collect();
             host_options.push("Rescan / Change Subnet".to_string());
             host_options.push("Exit NetScope".to_string());
 
@@ -90,7 +92,7 @@ fn main() {
                     "Ping Latency Check",
                     "Scan Ports",
                     "Select Another Host",
-                    "Exit NetScope",
+                    "Exit NetScope"
                 ];
 
                 let action_title = format!("Target: {target_ip}");
@@ -99,8 +101,12 @@ fn main() {
                 match action {
                     0 => ping_host(target_ip),
                     1 => configure_and_run_port_scan(target_ip),
-                    2 => continue 'target,
-                    3 => break 'app,
+                    2 => {
+                        continue 'target;
+                    }
+                    3 => {
+                        break 'app;
+                    }
                     _ => {}
                 }
             }
@@ -109,10 +115,7 @@ fn main() {
     println!("\n{BOLD}Goodbye!{RESET}");
 }
 
-fn run_with_spinner<F, T>(message: &str, f: F) -> T
-where
-    F: FnOnce() -> T,
-{
+fn run_with_spinner<F, T>(message: &str, f: F) -> T where F: FnOnce() -> T {
     let done = Arc::new(AtomicBool::new(false));
     let done_clone = done.clone();
     let msg = message.to_string();
@@ -140,7 +143,6 @@ where
 fn prompt_menu<T: AsRef<str>>(title: &str, options: &[T]) -> usize {
     let _guard = TerminalModeGuard::new();
     let mut selected = 0;
-    let mut stdin = io::stdin();
 
     loop {
         print!("\r{BOLD}{title}:{RESET}\r\n");
@@ -154,65 +156,40 @@ fn prompt_menu<T: AsRef<str>>(title: &str, options: &[T]) -> usize {
         }
         let _ = io::stdout().flush();
 
-        let mut buf = [0u8; 1];
-        if stdin.read(&mut buf).is_err() {
-            break;
-        }
-
-        match buf[0] {
-            3 => {
-                print!("\x1b[?25h\r\n");
-                let _ = io::stdout().flush();
-                let _ = Command::new("stty").arg("sane").status();
-                std::process::exit(0);
-            }
-            b'\r' | b'\n' => {
-                print!("\x1b[{}A", options.len() + 1);
-                print!(
-                    "\r\x1b[K{BOLD}{title}:{RESET} {GREEN}{}{RESET}\r\n",
-                    options[selected].as_ref()
-                );
-                for _ in 0..options.len() {
-                    print!("\r\x1b[K\r\n");
+        if let Ok(Event::Key(key_event)) = event::read() {
+            match key_event.code {
+                KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                    drop(_guard);
+                    std::process::exit(0);
                 }
-                print!("\x1b[{}A", options.len());
-                let _ = io::stdout().flush();
-                return selected;
-            }
-            b'j' | b'J' => {
-                if selected > 0 {
-                    selected -= 1;
-                }
-            }
-            b'k' | b'K' => {
-                if selected + 1 < options.len() {
-                    selected += 1;
-                }
-            }
-            27 => {
-                let mut seq = [0u8; 2];
-                if stdin.read_exact(&mut seq).is_ok() && seq[0] == b'[' {
-                    match seq[1] {
-                        b'A' => {
-                            if selected > 0 {
-                                selected -= 1;
-                            }
-                        }
-                        b'B' => {
-                            if selected + 1 < options.len() {
-                                selected += 1;
-                            }
-                        }
-                        _ => {}
+                KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
+                    if selected > 0 {
+                        selected -= 1;
                     }
                 }
+                KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
+                    if selected + 1 < options.len() {
+                        selected += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    print!("\x1b[{}A", options.len() + 1);
+                    print!(
+                        "\r\x1b[K{BOLD}{title}:{RESET} {GREEN}{}{RESET}\r\n",
+                        options[selected].as_ref()
+                    );
+                    for _ in 0..options.len() {
+                        print!("\r\x1b[K\r\n");
+                    }
+                    print!("\x1b[{}A", options.len());
+                    let _ = io::stdout().flush();
+                    return selected;
+                }
+                _ => {}
             }
-            _ => {}
         }
-
         print!("\x1b[{}A", options.len() + 1);
     }
-    selected
 }
 
 fn prompt_subnet() -> String {
@@ -254,8 +231,12 @@ fn prompt_yes_no(prompt_msg: &str) -> bool {
         let mut input = String::new();
         if io::stdin().read_line(&mut input).is_ok() {
             match input.trim().to_lowercase().as_str() {
-                "y" | "yes" => return true,
-                "n" | "no" => return false,
+                "y" | "yes" => {
+                    return true;
+                }
+                "n" | "no" => {
+                    return false;
+                }
                 _ => {}
             }
             println!("{GRAY}Please answer with 'y' or 'n'.{RESET}");
@@ -293,7 +274,7 @@ fn configure_and_run_port_scan(ip: IpAddr) {
         "Quick Scan (Top 20 common ports)",
         "Full Range Scan (1 - 65535)",
         "Custom Range",
-        "Back",
+        "Back"
     ];
 
     let choice = prompt_menu("Port Scan Profiles", &scan_profiles);
@@ -301,8 +282,25 @@ fn configure_and_run_port_scan(ip: IpAddr) {
     match choice {
         0 => {
             let common_ports = vec![
-                21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443, 445, 1433, 3306, 3389, 5432, 6379,
-                8080, 8443,
+                21,
+                22,
+                23,
+                25,
+                53,
+                80,
+                110,
+                135,
+                139,
+                143,
+                443,
+                445,
+                1433,
+                3306,
+                3389,
+                5432,
+                6379,
+                8080,
+                8443
             ];
             let res = run_with_spinner("Scanning top ports", || {
                 scan_port_list(ip, &common_ports)
@@ -310,7 +308,9 @@ fn configure_and_run_port_scan(ip: IpAddr) {
             print_scan_results(ip, res);
         }
         1 => {
-            let res = run_with_spinner("Scanning all 65,535 ports", || port_scan_range(ip, 1, 65535));
+            let res = run_with_spinner("Scanning all 65,535 ports", ||
+                port_scan_range(ip, 1, 65535)
+            );
             print_scan_results(ip, res);
         }
         2 => {
@@ -318,7 +318,7 @@ fn configure_and_run_port_scan(ip: IpAddr) {
             let end = prompt_number_in_range(
                 "Enter end port (1-65535): ",
                 start as usize,
-                65535,
+                65535
             ) as u16;
             let res = run_with_spinner(&format!("Scanning ports {start}..={end}"), || {
                 port_scan_range(ip, start, end)
@@ -356,45 +356,49 @@ fn is_host_alive(ip: IpAddr) -> bool {
 }
 
 fn discover_hosts(subnet_prefix: &str) -> Vec<IpAddr> {
-    let (tx, rx) = mpsc::channel();
     let mut handles = vec![];
+    let discovery_ports = [80, 443, 22, 445, 139, 53, 8080, 5353, 62078];
 
-    for host_id in 1..=254 {
-        let tx = tx.clone();
-        let ip_str = format!("{subnet_prefix}.{host_id}");
+    for i in 1..=254 {
+        let ip_str = format!("{subnet_prefix}.{i}");
+        let ip: IpAddr = match ip_str.parse() {
+            Ok(ip) => ip,
+            Err(_) => {
+                continue;
+            }
+        };
 
         let handle = thread::spawn(move || {
-            if let Ok(ip) = IpAddr::from_str(&ip_str) {
-                if is_host_alive(ip) {
-                    let _ = tx.send(ip);
+            for &port in &discovery_ports {
+                let socket_addr = SocketAddr::new(ip, port);
+                match TcpStream::connect_timeout(&socket_addr, Duration::from_millis(200)) {
+                    Ok(_) => {
+                        return Some(ip);
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::ConnectionRefused => {
+                        return Some(ip);
+                    }
+                    _ => {}
                 }
             }
+            None
         });
         handles.push(handle);
     }
 
-    drop(tx);
-
-    let mut active = vec![];
-    for ip in rx {
-        active.push(ip);
-    }
-
+    let mut active = Vec::new();
     for handle in handles {
-        let _ = handle.join();
+        if let Ok(Some(ip)) = handle.join() {
+            active.push(ip);
+        }
     }
-
     active.sort();
     active
 }
 
 fn ping_host(ip: IpAddr) {
     println!("\nPinging {ip}...");
-    let status = Command::new("ping")
-        .arg("-c")
-        .arg("4")
-        .arg(ip.to_string())
-        .status();
+    let status = Command::new("ping").arg("-c").arg("4").arg(ip.to_string()).status();
 
     match status {
         Ok(s) if s.success() => println!("{GREEN}Ping successful.{RESET}\n"),
@@ -411,7 +415,7 @@ fn scan_port_list(ip: IpAddr, ports: &[u16]) -> (Vec<u16>, Duration) {
     let (tx, rx) = mpsc::channel();
     let total_ports = ports.len();
 
-    let worker_count = 250.min(total_ports).max(1);
+    let worker_count = (250).min(total_ports).max(1);
     let chunk_size = (total_ports + worker_count - 1) / worker_count;
 
     thread::scope(|s| {
@@ -448,13 +452,10 @@ fn print_scan_results(ip: IpAddr, (open_ports, elapsed): (Vec<u16>, Duration)) {
     }
 
     println!("\nOpen ports on {ip}:");
-    for &port in &open_ports { // <-- Added `&` before open_ports
+    for &port in &open_ports {
+        // <-- Added `&` before open_ports
         let service = get_service_name(port);
         println!("  Port {GREEN}{port:>5}/tcp{RESET} OPEN ({service})");
     }
-    println!(
-        "\nScan complete: Found {} open port(s) in {:.2?}\n",
-        open_ports.len(),
-        elapsed
-    );
+    println!("\nScan complete: Found {} open port(s) in {:.2?}\n", open_ports.len(), elapsed);
 }
