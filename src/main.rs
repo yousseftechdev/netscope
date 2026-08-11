@@ -2,14 +2,14 @@
 #![allow(unused)]
 #![allow(dead_code)]
 
-use std::thread;
-use std::io::{ self, Write };
+use std::io::{ self, Read, Write };
 use std::net::{ IpAddr, SocketAddr, TcpStream };
 use std::process::Command;
 use std::str::FromStr;
 use std::sync::atomic::{ AtomicU32, Ordering };
 use std::sync::mpsc;
 use std::sync::Arc;
+use std::thread;
 use std::time::{ Duration, Instant };
 
 const GREEN: &str = "\x1b[32m";
@@ -20,6 +20,25 @@ const BOLD: &str = "\x1b[1m";
 enum ScanEvent {
     Open(u16),
     Progress,
+}
+
+struct TerminalModeGuard;
+
+impl TerminalModeGuard {
+    fn new() -> Self {
+        let _ = Command::new("stty").arg("raw").arg("-echo").status();
+        print!("\x1b[?25l");
+        let _ = io::stdout().flush();
+        TerminalModeGuard
+    }
+}
+
+impl Drop for TerminalModeGuard {
+    fn drop(&mut self) {
+        let _ = Command::new("stty").arg("sane").status();
+        print!("\x1b[?25h");
+        let _ = io::stdout().flush();
+    }
 }
 
 fn main() {
@@ -42,51 +61,42 @@ fn main() {
         }
 
         'target: loop {
-            println!("{BOLD}Discovered Hosts:{RESET}");
-            for (idx, ip) in active_ips.iter().enumerate() {
-                println!("[{}] {}", idx + 1, ip);
-            }
+            let mut host_options: Vec<String> = active_ips
+                .iter()
+                .map(|ip| ip.to_string())
+                .collect();
+            host_options.push("Rescan / Change Subnet".to_string());
+            host_options.push("Exit NetScope".to_string());
 
-            println!("[0] Rescan / Change Subnet");
-            println!("[99] Exit NetScope");
+            let selection = prompt_menu("Discovered Hosts", &host_options);
 
-            let choice = prompt_number_in_range(
-                &format!("\nSelect a host (1-{}, or 0/99): ", active_ips.len()),
-                0,
-                99
-            );
-
-            if choice == 0 {
+            if selection == active_ips.len() {
                 continue 'app;
             }
-            if choice == 99 {
+            if selection == active_ips.len() + 1 {
                 break 'app;
             }
 
-            let selected_index = choice - 1;
-            if selected_index >= active_ips.len() {
-                eprintln!("Invalid selection.");
-                continue 'target;
-            }
-
-            let target_ip = active_ips[selected_index];
+            let target_ip = active_ips[selection];
 
             'action: loop {
-                println!("\n{BOLD}Target: {target_ip}{RESET}");
-                println!("  [1] Ping Latency Check");
-                println!("  [2] Scan Ports");
-                println!("  [3] Select Another Host");
-                println!("  [0] Exit NetScope");
+                let action_options = vec![
+                    "Ping Latency Check",
+                    "Scan Ports",
+                    "Select Another Host",
+                    "Exit NetScope"
+                ];
 
-                let action = prompt_number_in_range("Choose action (0-3): ", 0, 3);
+                let action_title = format!("Target: {target_ip}");
+                let action = prompt_menu(&action_title, &action_options);
 
                 match action {
-                    1 => ping_host(target_ip),
-                    2 => configure_and_run_port_scan(target_ip),
-                    3 => {
+                    0 => ping_host(target_ip),
+                    1 => configure_and_run_port_scan(target_ip),
+                    2 => {
                         continue 'target;
                     }
-                    0 => {
+                    3 => {
                         break 'app;
                     }
                     _ => {}
@@ -95,6 +105,78 @@ fn main() {
         }
     }
     println!("\n{BOLD}Goodbye!{RESET}");
+}
+
+fn prompt_menu<T: AsRef<str>>(title: &str, options: &[T]) -> usize {
+    let _guard = TerminalModeGuard::new();
+    let mut selected = 0;
+    let mut stdin = io::stdin();
+
+    loop {
+        print!("\r{BOLD}{title}:{RESET}\r\n");
+        for (idx, option) in options.iter().enumerate() {
+            let label = option.as_ref();
+            if idx == selected {
+                print!("\r  {GREEN}❯ {label}{RESET}\x1b[K\r\n");
+            } else {
+                print!("\r    {label}\x1b[K\r\n");
+            }
+        }
+        let _ = io::stdout().flush();
+
+        let mut buf = [0u8; 1];
+        if stdin.read(&mut buf).is_err() {
+            break;
+        }
+
+        match buf[0] {
+            b'\r' | b'\n' => {
+                print!("\x1b[{}A", options.len() + 1);
+                print!(
+                    "\r\x1b[K{BOLD}{title}:{RESET} {GREEN}{}{RESET}\r\n",
+                    options[selected].as_ref()
+                );
+                for _ in 0..options.len() {
+                    print!("\r\x1b[K\r\n");
+                }
+                print!("\x1b[{}A", options.len());
+                let _ = io::stdout().flush();
+                return selected;
+            }
+            b'i' | b'I' => {
+                if selected > 0 {
+                    selected -= 1;
+                }
+            }
+            b'k' | b'K' => {
+                if selected + 1 < options.len() {
+                    selected += 1;
+                }
+            }
+            27 => {
+                let mut seq = [0u8; 2];
+                if stdin.read_exact(&mut seq).is_ok() && seq[0] == b'[' {
+                    match seq[1] {
+                        b'A' => {
+                            if selected > 0 {
+                                selected -= 1;
+                            }
+                        }
+                        b'B' => {
+                            if selected + 1 < options.len() {
+                                selected += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        print!("\x1b[{}A", options.len() + 1);
+    }
+    selected
 }
 
 fn prompt_subnet() -> String {
@@ -175,16 +257,17 @@ fn get_service_name(port: u16) -> &'static str {
 }
 
 fn configure_and_run_port_scan(ip: IpAddr) {
-    println!("\n{BOLD}Port Scan Profiles:{RESET}");
-    println!("  [1] Quick Scan (Top 20 common ports)");
-    println!("  [2] Full Range Scan (1 - 65535)");
-    println!("  [3] Custom Range");
-    println!("  [0] Back");
+    let scan_profiles = vec![
+        "Quick Scan (Top 20 common ports)",
+        "Full Range Scan (1 - 65535)",
+        "Custom Range",
+        "Back"
+    ];
 
-    let choice = prompt_number_in_range("Select profile (0-3): ", 0, 3);
+    let choice = prompt_menu("Port Scan Profiles", &scan_profiles);
 
     match choice {
-        1 => {
+        0 => {
             let common_ports = vec![
                 21,
                 22,
@@ -208,8 +291,8 @@ fn configure_and_run_port_scan(ip: IpAddr) {
             ];
             scan_port_list(ip, &common_ports);
         }
-        2 => port_scan_range(ip, 1, 65535),
-        3 => {
+        1 => port_scan_range(ip, 1, 65535),
+        2 => {
             let start = prompt_number_in_range("Enter start port (1-65535): ", 1, 65535) as u16;
             let end = prompt_number_in_range(
                 "Enter end port (1-65535): ",
