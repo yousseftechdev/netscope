@@ -8,9 +8,6 @@ on:
 permissions:
   contents: write
 
-env:
-  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
-
 jobs:
   build:
     name: Build ${{ matrix.target }}
@@ -39,6 +36,16 @@ jobs:
 
       - name: Build Binary
         run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare Artifact
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release/
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            mv netscope.exe ${{ matrix.artifact_name }}
+          else
+            mv netscope ${{ matrix.artifact_name }}
+          fi
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
