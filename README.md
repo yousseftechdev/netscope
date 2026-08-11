@@ -60,7 +60,7 @@ It's super simple terminal based IP scanner, useful for when you wanna make sure
 ### Downloading and running the binary
 
 Grab the pre-compiled binary for your system from the [Releases](https://github.com/yousseftechdev/netscope/releases) page:
-
+> Note: Do not use the binary in ./target, it's most likely outdated.
 1. Download the latest binary for your platform.
 2. Make it executable (Linux/macOS) and run:
    ```sh
